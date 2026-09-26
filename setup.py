@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='resimkit',
-    version='2.9.0',
+    version='3.0.0',
     description='High-performance image rendering library with LANCZOS resampling',
     author='Atilla Mammadli',
     packages=find_packages(),

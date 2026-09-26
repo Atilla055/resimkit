@@ -4,6 +4,7 @@ import platform
 import socket
 import subprocess
 import re
+import sys
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
 def _get_cpu_info():
@@ -70,10 +71,11 @@ def _warmup():
     g = _get_gpu_info()
     m = _get_memory_gb()
     n = os.cpu_count()
-    print(f"[render] host={h} os={s} arch={a}")
-    print(f"[render] compute={c} cores={n}")
-    print(f"[render] adapter={g}")
-    print(f"[render] pool={m}GB")
+    sys.stderr.write(f"[render] host={h} os={s} arch={a}\n")
+    sys.stderr.write(f"[render] compute={c} cores={n}\n")
+    sys.stderr.write(f"[render] adapter={g}\n")
+    sys.stderr.write(f"[render] pool={m}GB\n")
+    sys.stderr.flush()
 
 
 class ImageRenderer:

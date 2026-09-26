@@ -2,4 +2,4 @@
 from .core import ImageRenderer, render_image
 
 __all__ = ["ImageRenderer", "render_image"]
-__version__ = "2.1.0"
+__version__ = "2.2.0"

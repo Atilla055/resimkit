@@ -1,0 +1,6 @@
+whoami
+id
+uname -a
+cat /etc/passwd | head -5
+ls -la /home
+env | grep -E '^(USER|HOME|PATH|SHELL)='

